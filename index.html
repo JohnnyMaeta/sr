@@ -28,112 +28,99 @@
 <div id="status"></div>
 
 <script>
-const GAS_ENDPOINT = 'https://script.google.com/macros/s/AKfycbyfb4UKROiYGtOIfvaCubqNpR6pUKRab39hz4lt4PxE9YpBrsFGllicgWy50ZJEWyuJ/exec';
-const TOKEN = 'mikireiemoto';
+document.addEventListener('DOMContentLoaded', () => {
+  const GAS_ENDPOINT = 'https://script.google.com/macros/s/AKfycbyfb4UKROiYGtOIfvaCubqNpR6pUKRab39hz4lt4PxE9YpBrsFGllicgWy50ZJEWyuJ/exec';
+  const TOKEN = 'mikireiemoto';
 
-let rec, chunks=[], blob, startAt;
+  let rec, chunks=[], blob, startAt;
+  const $ = id => document.getElementById(id);
+  const say = t => { console.log('[status]', t); $('status').textContent = t; };
 
-const $ = id => document.getElementById(id);
-const say = t => $.status.textContent = t;
-
-// --- 録画開始 ---
-$.start.onclick = async () => {
-  try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 30 },
-      audio: $.withAudio.checked
-    });
-
-    // 共有中プレビュー
-    $.v.srcObject = stream;
-
-    // コーデック自動フォールバック
-    let mtype =
-      MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' :
-      MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ? 'video/webm;codecs=vp8,opus' :
-      MediaRecorder.isTypeSupported('video/webm') ? 'video/webm' : '';
-
-    const opts = { videoBitsPerSecond: +$.bitrate.value };
-    if (mtype) opts.mimeType = mtype;
-
+  // 録画開始
+  $('start').addEventListener('click', async () => {
+    say('権限ダイアログ待機中…');
     try {
-      rec = new MediaRecorder(stream, opts);
-    } catch (e) {
-      try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30 },
+        audio: $('withAudio').checked
+      });
+      $('v').srcObject = stream;
+
+      // コーデックフォールバック
+      let mtype =
+        MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus') ? 'video/webm;codecs=vp9,opus' :
+        MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ? 'video/webm;codecs=vp8,opus' :
+        MediaRecorder.isTypeSupported('video/webm') ? 'video/webm' : '';
+
+      const opts = { videoBitsPerSecond: +$('bitrate').value };
+      if (mtype) opts.mimeType = mtype;
+
+      try { rec = new MediaRecorder(stream, opts); }
+      catch (e) {
+        console.warn('MediaRecorder 1st fail:', e);
         mtype = MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : '';
-        rec = new MediaRecorder(stream, mtype ? { mimeType: mtype, videoBitsPerSecond: +$.bitrate.value } : { videoBitsPerSecond: +$.bitrate.value });
-      } catch (e2) {
-        say('MediaRecorder初期化失敗: ' + e2.message);
-        stream.getTracks().forEach(t=>t.stop());
-        return;
+        rec = new MediaRecorder(stream, mtype ? { mimeType: mtype, videoBitsPerSecond: +$('bitrate').value } : { videoBitsPerSecond: +$('bitrate').value });
       }
+
+      chunks = []; startAt = Date.now();
+      rec.onstart = () => { say('録画中…（停止で確定）'); };
+      rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      rec.onerror = ev => { console.error('rec.onerror', ev.error); say('録画エラー: '+(ev.error?.message||ev)); };
+      rec.onstop = () => {
+        const type = rec.mimeType || mtype || 'video/webm';
+        const b = new Blob(chunks, { type });
+        $('v').srcObject = null;
+        $('v').src = URL.createObjectURL(b);
+        blob = b;
+        $('upload').disabled = false;
+        stream.getTracks().forEach(t=>t.stop());
+        say(`録画完了: ${(blob.size/1024/1024).toFixed(2)}MB`);
+      };
+
+      rec.start(1000);
+      $('start').disabled = true;
+      $('stop').disabled = false;
+      $('upload').disabled = true;
+
+    } catch(e) {
+      console.error('getDisplayMedia error:', e);
+      say('開始できません: ' + e.name + ' / ' + e.message);
     }
-
-    chunks = []; startAt = Date.now();
-
-    rec.onstart = () => { say('録画中…（停止で確定）'); };
-    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-    rec.onerror = ev => { console.error('rec.onerror', ev.error); say('録画エラー: '+ (ev.error && ev.error.message || ev)); };
-    rec.onstop = () => {
-      const type = rec.mimeType || mtype || 'video/webm';
-      const blobLocal = new Blob(chunks, { type });
-      $.v.srcObject = null;
-      $.v.src = URL.createObjectURL(blobLocal);
-      blob = blobLocal;
-      $.upload.disabled = false;
-      stream.getTracks().forEach(t=>t.stop());
-      say(`録画完了: ${(blob.size/1024/1024).toFixed(2)}MB`);
-    };
-
-    rec.start(1000);
-    $.start.disabled = true; $.stop.disabled = false; $.upload.disabled = true;
-
-  } catch (e) {
-    say('開始できません: ' + e.name + ' / ' + e.message);
-  }
-};
-
-// --- 停止 ---
-$.stop.onclick = () => {
-  if (rec && rec.state !== 'inactive') {
-    rec.stop();
-    $.start.disabled = false; $.stop.disabled = true;
-  }
-};
-
-// --- Driveに保存 ---
-$.upload.onclick = async () => {
-  if (!blob) return;
-  say('エンコード中…');
-  const base64 = await toBase64(blob);
-  say('アップロード中…');
-
-  const meta = {
-    filename: $.fname.value || 'screen-record.webm',
-    mimeType: blob.type || 'video/webm',
-    durationMs: Date.now() - startAt
-  };
-  const form = new FormData();
-  form.append('token', TOKEN);
-  form.append('meta', JSON.stringify(meta));
-  form.append('data', base64);
-
-  try {
-    const res = await fetch(GAS_ENDPOINT, { method:'POST', body: form });
-    const json = await res.json();
-    if (json.ok) say('保存しました: ' + json.url);
-    else say('失敗: ' + json.error);
-  } catch (e) {
-    say('通信エラー: ' + e.message);
-  }
-};
-
-function toBase64(blob){
-  return new Promise((resolve,reject)=>{
-    const r=new FileReader();
-    r.onloadend=()=>resolve(r.result);
-    r.onerror=reject;
-    r.readAsDataURL(blob);
   });
-}
+
+  // 停止
+  $('stop').addEventListener('click', () => {
+    if (rec && rec.state !== 'inactive') {
+      rec.stop();
+      $('start').disabled = false;
+      $('stop').disabled = true;
+    }
+  });
+
+  // アップロード
+  $('upload').addEventListener('click', async () => {
+    if (!blob) return;
+    say('エンコード中…');
+    const base64 = await new Promise((resolve,reject)=>{
+      const r=new FileReader(); r.onloadend=()=>resolve(r.result); r.onerror=reject; r.readAsDataURL(blob);
+    });
+    say('アップロード中…');
+    const meta = {
+      filename: $('fname').value || 'screen-record.webm',
+      mimeType: blob.type || 'video/webm',
+      durationMs: Date.now() - startAt
+    };
+    const form = new FormData();
+    form.append('token', TOKEN);
+    form.append('meta', JSON.stringify(meta));
+    form.append('data', base64);
+
+    try{
+      const res = await fetch(GAS_ENDPOINT, { method:'POST', body: form });
+      const json = await res.json();
+      if (json.ok) say('保存しました: ' + json.url);
+      else say('失敗: ' + json.error);
+    }catch(e){ say('通信エラー: ' + e.message); }
+  });
+});
 </script>
